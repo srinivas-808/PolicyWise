@@ -12,11 +12,9 @@ import chromadb
 # This block ensures pysqlite3 is loaded and replaces standard sqlite3
 # BEFORE any other library (like chromadb) tries to import sqlite3.
 # The 'import pysqlite3' directly is more robust than __import__
-try:
-    import pysqlite3 
-    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-except ImportError:
-    st.warning("pysqlite3-binary not found. Falling back to default sqlite3. Expect issues if system sqlite3 is old.")
+__import__('pysqlite3')
+import sys # <--- THIS IS THE MISSING IMPORT!
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 # --- END CRITICAL FIX ---
 
 
