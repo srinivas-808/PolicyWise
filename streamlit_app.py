@@ -5,7 +5,9 @@ import json
 import tempfile 
 from dotenv import load_dotenv
 # import re # --- REMOVED: No longer needed for complex text cleaning ---
-
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 # LangChain and Pydantic Imports
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma 
