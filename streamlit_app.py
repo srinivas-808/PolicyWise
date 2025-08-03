@@ -337,33 +337,40 @@ if uploaded_files:
     files_hash = hash(tuple((f.name, f.size) for f in uploaded_files))
     
     if st.button("Process Documents", key="process_docs_button"):
-        # --- NEW: Delete previous ChromaDB data for a fresh start ---
-        if os.path.exists(CHROMA_DB_DIR):
-            try:
-                shutil.rmtree(CHROMA_DB_DIR)
-                st.info(f"Cleared previous data in {CHROMA_DB_DIR} for fresh processing.")
-            except OSError as e:
-                st.error(f"Error removing previous ChromaDB data: {e}")
-                st.stop() # Stop execution if unable to clear old data
+    # --- IMPORTANT: Ensure previous ChromaDB data is cleared ---
+    if os.path.exists(CHROMA_DB_DIR):
+        try:
+            shutil.rmtree(CHROMA_DB_DIR)
+            st.info(f"Cleared previous data in {CHROMA_DB_DIR} for fresh processing.")
+        except OSError as e:
+            st.error(f"Error removing previous ChromaDB data: {e}. Please manually delete '{CHROMA_DB_DIR}' if this persists.")
+            st.stop() # Stop execution if unable to clear old data
 
-        st.session_state['processed'] = False 
-        st.session_state['retriever'] = None
-        st.session_state['llm'] = None
-        st.session_state['uploaded_files_hash'] = files_hash 
-        st.session_state['uploaded_raw_docs'] = load_documents_from_upload(uploaded_files) # Store raw docs here
-        
-        if st.session_state['uploaded_raw_docs']:
-            try:
-                llm_instance, retriever_instance = create_vector_store_and_retriever() 
-                st.session_state['llm'] = llm_instance
-                st.session_state['retriever'] = retriever_instance
-                st.session_state['processed'] = True
-                st.success(f"Successfully processed {len(st.session_state['uploaded_raw_docs'])} documents and built knowledge base!")
-            except Exception as e:
-                st.error(f"Error during document processing: {e}")
-                st.warning("Please ensure your Google API Key is correctly set in your .env file.")
-        else:
-            st.warning("No documents were loaded from the uploaded files.")
+    # --- CRUCIAL FIX: Explicitly clear the cache for this specific function ---
+    # This forces Streamlit to re-run create_vector_store_and_retriever() completely
+    # and create new vectorstore and retriever objects.
+    create_vector_store_and_retriever.clear() 
+
+    st.session_state['processed'] = False 
+    st.session_state['retriever'] = None
+    st.session_state['llm'] = None
+    # No need to update uploaded_files_hash or uploaded_raw_docs state if they are already set from file_uploader
+    # and load_documents_from_upload, as the cache clear will make create_vector_store_and_retriever re-execute.
+    st.session_state['uploaded_raw_docs'] = load_documents_from_upload(uploaded_files) # Reload/assign raw docs
+
+    if st.session_state['uploaded_raw_docs']:
+        try:
+            # Call cached function without arguments, it picks from session_state
+            llm_instance, retriever_instance = create_vector_store_and_retriever() 
+            st.session_state['llm'] = llm_instance
+            st.session_state['retriever'] = retriever_instance
+            st.session_state['processed'] = True
+            st.success(f"Successfully processed {len(st.session_state['uploaded_raw_docs'])} documents and built knowledge base!")
+        except Exception as e:
+            st.error(f"Error during document processing: {e}")
+            st.warning("Please ensure your Google API Key is correctly set in your .env file.")
+    else:
+        st.warning("No documents were loaded from the uploaded files.")
 elif 'processed' in st.session_state and st.session_state['processed']:
     current_files_hash = hash(tuple((f.name, f.size) for f in uploaded_files)) if uploaded_files else None
     if 'uploaded_files_hash' in st.session_state and st.session_state['uploaded_files_hash'] != current_files_hash:
