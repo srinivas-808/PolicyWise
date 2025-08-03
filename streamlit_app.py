@@ -128,32 +128,42 @@ def create_vector_store_and_retriever():
     embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL_NAME)
     llm = ChatGoogleGenerativeAI(model=GEMINI_LLM_MODEL, temperature=0.2)
 
-    # --- NEW: Initialize a PURE IN-MEMORY ChromaDB client ---
-    # This completely bypasses all file-based sqlite3 issues.
+    collection_name = "policy_docs_in_memory_session" 
+
     try:
         client = chromadb.Client() 
-        collection_name = "policy_docs_in_memory_session" 
         
-        # Ensure collection is fresh for this in-memory client
         try:
-            client.delete_collection(name=collection_name) # Always delete for a fresh in-memory state
+            client.delete_collection(name=collection_name)
             st.info(f"Deleted previous in-memory ChromaDB collection '{collection_name}'.")
         except: 
-            pass # Ignore if collection doesn't exist yet (first run)
+            pass 
 
+        # Create collection with the correct embedding_function
+        # For explicit client, embedding_function is set here.
         collection = client.create_collection(name=collection_name, embedding_function=embeddings)
         
-        ids = [f"doc_{i}" for i in range(len(chunks))]
-        documents_content = [chunk.page_content for chunk in chunks]
-        metadatas = [chunk.metadata for chunk in chunks]
+        # --- NEW: Batching for adding documents to ChromaDB ---
+        batch_size = 100 # Process 100 chunks at a time for embedding
+        for i in range(0, len(chunks), batch_size):
+            batch_chunks = chunks[i:i + batch_size]
+            
+            # Prepare data for this batch
+            batch_ids = [f"doc_{j}" for j in range(i, i + len(batch_chunks))]
+            batch_documents_content = [chunk.page_content for chunk in batch_chunks]
+            batch_metadatas = [chunk.metadata for chunk in batch_chunks]
+            
+            # Add the batch to the collection
+            collection.add(
+                ids=batch_ids,
+                documents=batch_documents_content,
+                metadatas=batch_metadatas
+            )
+            st.write(f"Added batch {i//batch_size + 1} of {len(batch_chunks)} chunks.")
         
-        collection.add(
-            ids=ids,
-            documents=documents_content,
-            metadatas=metadatas
-        )
-        st.write(f"ChromaDB in-memory collection '{collection_name}' populated.")
+        st.write(f"ChromaDB in-memory collection '{collection_name}' populated with {len(chunks)} chunks.")
         
+        # Use the LangChain wrapper around the explicit in-memory client and collection
         vectorstore = Chroma(client=client, collection_name=collection_name, embedding_function=embeddings)
         st.success("ChromaDB initialized in-memory (no disk issues!). Data will not persist across app restarts.")
 
@@ -181,6 +191,7 @@ def create_vector_store_and_retriever():
     )
     st.write("Hybrid Retriever initialized.")
     return llm, retriever
+
 
 # --- Core Policy Decision Logic (No functional change) ---
 def get_policy_decision(user_query: str, llm_instance, retriever_instance) -> PolicyDecision | None:
