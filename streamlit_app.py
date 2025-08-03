@@ -336,15 +336,20 @@ uploaded_files = st.file_uploader(
 if uploaded_files:
     files_hash = hash(tuple((f.name, f.size) for f in uploaded_files))
     
-    if st.button("Process Documents", key="process_docs_button"):
-    # --- IMPORTANT: Ensure previous ChromaDB data is cleared ---
-    if os.path.exists(CHROMA_DB_DIR):
-        try:
-            shutil.rmtree(CHROMA_DB_DIR)
-            st.info(f"Cleared previous data in {CHROMA_DB_DIR} for fresh processing.")
-        except OSError as e:
-            st.error(f"Error removing previous ChromaDB data: {e}. Please manually delete '{CHROMA_DB_DIR}' if this persists.")
-            st.stop() # Stop execution if unable to clear old data
+    if st.button("Clear Processed Data & Restart", key="clear_data_button"): # This is line 339
+        # This line MUST be indented with 4 spaces (relative to the 'if' above)
+        if os.path.exists(CHROMA_DB_DIR):
+            # This line and the next few lines MUST be indented with 8 spaces
+            import shutil
+            try:
+                shutil.rmtree(CHROMA_DB_DIR)
+                st.success("Cleaned up processed data and restarted session.")
+            except OSError as e:
+                st.error(f"Error removing ChromaDB directory: {e}. Please manually delete '{CHROMA_DB_DIR}' if this persists.")
+        # This line MUST be indented with 4 spaces (relative to the outermost 'if')
+        st.session_state.clear() 
+        # This line MUST be indented with 4 spaces (relative to the outermost 'if')
+        st.rerun()  # Stop execution if unable to clear old data
 
     # --- CRUCIAL FIX: Explicitly clear the cache for this specific function ---
     # This forces Streamlit to re-run create_vector_store_and_retriever() completely
