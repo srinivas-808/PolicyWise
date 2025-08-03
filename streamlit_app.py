@@ -425,13 +425,15 @@ else:
 
 # --- Clean up cached resources on app rerun or close ---
 if st.button("Clear Processed Data & Restart", key="clear_data_button"):
-    st.cache_resource.clear() # Clear Streamlit's cache
+    # This line (and all lines below it that are part of this block) needs 4 spaces indentation
     if os.path.exists(CHROMA_DB_DIR):
+        # This line (and all its sub-lines) needs 8 spaces indentation
         import shutil
         try:
-            shutil.rmtree(CHROMA_DB_DIR) # Remove the persisted ChromaDB
+            shutil.rmtree(CHROMA_DB_DIR)
             st.success("Cleaned up processed data and restarted session.")
         except OSError as e:
             st.error(f"Error removing ChromaDB directory: {e}. Please manually delete '{CHROMA_DB_DIR}' if this persists.")
-    st.session_state.clear() # Clear all session state variables
+    # This line (and its sub-lines) needs 4 spaces indentation
+    st.session_state.clear()
     st.rerun() # Rerun the app from top to reset UI
