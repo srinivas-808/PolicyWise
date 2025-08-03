@@ -4,11 +4,15 @@ import os
 import json
 import tempfile 
 from dotenv import load_dotenv
-import shutil # --- NEW: Import shutil for directory operations ---
+import shutil # For removing directories
 
+# --- CRITICAL FIX FOR SQLITE3 COMPATIBILITY (MUST BE AT THE VERY TOP) ---
+# This block ensures ChromaDB uses pysqlite3-binary instead of system sqlite3
 __import__('pysqlite3')
 import sys
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+# --- END CRITICAL FIX ---
+
 # LangChain and Pydantic Imports
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma 
@@ -30,12 +34,24 @@ from query_parser import parse_user_query
 # --- Load Environment Variables ---
 load_dotenv() 
 
+# --- Initialize Streamlit session state variables at the top ---
+if 'processed' not in st.session_state:
+    st.session_state['processed'] = False
+if 'retriever' not in st.session_state:
+    st.session_state['retriever'] = None
+if 'llm' not in st.session_state:
+    st.session_state['llm'] = None
+if 'uploaded_files_hash' not in st.session_state:
+    st.session_state['uploaded_files_hash'] = None
+if 'uploaded_raw_docs' not in st.session_state:
+    st.session_state['uploaded_raw_docs'] = None
+
 # --- Configuration Constants ---
-CHROMA_DB_DIR = "chroma_db_streamlit" # Using a separate directory for UI's Chroma DB
+CHROMA_DB_DIR = "chroma_db_streamlit" 
 GEMINI_LLM_MODEL = "models/gemini-2.5-pro"
 EMBEDDING_MODEL_NAME = "models/text-embedding-004"
 
-# --- Pydantic Models (as defined previously) ---
+# --- Pydantic Models ---
 class SupportingClause(BaseModel):
     clause_text: str = Field(..., description="The exact text of the clause from the document.")
     document_id: str = Field(..., description="Identifier for the source document (e.g., policy_123.pdf).")
@@ -47,9 +63,9 @@ class PolicyDecision(BaseModel):
     Justification: str = Field(..., description="A clear explanation of the decision based on the retrieved clauses. MUST reference 'CHUNK_X' identifiers.")
     SupportingClauses: Optional[List[SupportingClause]] = Field(None, description="An array of specific clauses that led to the decision.")
 
+
 # --- Helper Function to Load Documents from Uploaded Files ---
 def load_documents_from_upload(uploaded_files):
-    """Loads documents from Streamlit UploadedFile objects, saving them temporarily."""
     documents = []
     with tempfile.TemporaryDirectory() as temp_dir:
         for uploaded_file in uploaded_files:
@@ -81,7 +97,7 @@ def load_documents_from_upload(uploaded_files):
                     doc.metadata["page_number"] = None
                 if 'source' not in doc.metadata:
                     doc.metadata['source'] = uploaded_file.name
-                doc.metadata["doc_type"] = "Policy Document" # Default for now
+                doc.metadata["doc_type"] = "Policy Document" 
                 doc.metadata["effective_date"] = "2023-01-01" 
                 doc.metadata["version"] = "1.0"
             documents.extend(docs)
@@ -92,10 +108,6 @@ def load_documents_from_upload(uploaded_files):
     hash_funcs={Document: lambda doc: (doc.page_content, tuple(sorted(doc.metadata.items())))}
 )
 def create_vector_store_and_retriever(): 
-    """
-    Creates the ChromaDB vector store and hybrid retriever from documents.
-    This function is cached by Streamlit to avoid re-running on every interaction.
-    """
     raw_documents_list = st.session_state.uploaded_raw_docs 
 
     st.info(f"Processing {len(raw_documents_list)} documents for ingestion and creating knowledge base. This may take a while...")
@@ -114,9 +126,6 @@ def create_vector_store_and_retriever():
     llm = ChatGoogleGenerativeAI(model=GEMINI_LLM_MODEL, temperature=0.2)
 
     # 3. Create/Load ChromaDB
-    # If CHROMA_DB_DIR exists (from a previous session or if not deleted by UI button), 
-    # Chroma might try to load it and append.
-    # The `shutil.rmtree(CHROMA_DB_DIR)` in the button logic handles clearing.
     vectorstore = Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
@@ -144,13 +153,13 @@ def create_vector_store_and_retriever():
     st.write("Hybrid Retriever initialized.")
     return llm, retriever
 
-# --- Core Policy Decision Logic (from app.py) ---
+# --- Core Policy Decision Logic ---
 def get_policy_decision(user_query: str, llm_instance, retriever_instance) -> PolicyDecision | None:
     """
     Processes a user query, retrieves relevant policy clauses, and generates a structured decision.
     Returns a PolicyDecision object or None on error.
     """
-    print(f"\nProcessing query: '{user_query}'") # Will print to console, not Streamlit app
+    print(f"\nProcessing query: '{user_query}'") # Will print to console/logs, not Streamlit app
 
     # 1. Parse and Structure the Query
     parsed_details = parse_user_query(user_query) 
@@ -158,13 +167,10 @@ def get_policy_decision(user_query: str, llm_instance, retriever_instance) -> Po
         st.error("Could not parse query details. Please refine your query.")
         return None
     
-    # st.json(parsed_details.model_dump_json(indent=2)) # Debugging parsed details in UI
-
-    current_date_for_policy_inference = date(2025, 8, 2) 
+    current_date_for_policy_inference = date(2025, 8, 2) # August 2, 2025
     if parsed_details.policy_duration_months is not None and parsed_details.policy_start_date is None:
         start_date = current_date_for_policy_inference - timedelta(days=parsed_details.policy_duration_months * 30)
         parsed_details.policy_start_date = start_date.strftime("%Y-%m-%d")
-        # st.write(f"Inferred policy start date: {parsed_details.policy_start_date}")
 
     retrieval_query = f"{user_query}. " + \
                       f"Details: Age={parsed_details.age}, Gender={parsed_details.gender}, " + \
@@ -182,8 +188,6 @@ def get_policy_decision(user_query: str, llm_instance, retriever_instance) -> Po
             Justification="No relevant policy clauses could be retrieved. The query might be too vague or outside the scope of uploaded documents. Please try rephrasing or providing more details.",
             SupportingClauses=[] 
         )
-
-    # st.write(f"Retrieved {len(relevant_chunks)} relevant chunks.")
     
     context_for_llm = []
     supporting_clauses_for_output = [] 
@@ -192,9 +196,9 @@ def get_policy_decision(user_query: str, llm_instance, retriever_instance) -> Po
         doc_id = doc.metadata.get('document_id', 'Unknown Document')
         page_num = doc.metadata.get('page_number', 'N/A')
         
-        # --- REVERTED: Simpler cleaning for clause_text (flattens to one line) ---
+        # Simpler cleaning for clause_text (flattens to one line for st.text)
         cleaned_clause_text = doc.page_content.replace('\n', ' ').strip() 
-        cleaned_clause_text = ' '.join(cleaned_clause_text.split()) # Normalize multiple spaces
+        cleaned_clause_text = ' '.join(cleaned_clause_text.split()) 
         
         context_for_llm.append(
             f"### {chunk_id} (Source: {doc_id}, Page: {page_num})\n"
@@ -336,46 +340,37 @@ uploaded_files = st.file_uploader(
 if uploaded_files:
     files_hash = hash(tuple((f.name, f.size) for f in uploaded_files))
     
-    if st.button("Clear Processed Data & Restart", key="clear_data_button"): # This is line 339
-        # This line MUST be indented with 4 spaces (relative to the 'if' above)
+    if st.button("Process Documents", key="process_docs_button"):
+        # --- Delete previous ChromaDB data for a fresh start ---
         if os.path.exists(CHROMA_DB_DIR):
-            # This line and the next few lines MUST be indented with 8 spaces
-            import shutil
             try:
                 shutil.rmtree(CHROMA_DB_DIR)
-                st.success("Cleaned up processed data and restarted session.")
+                st.info(f"Cleared previous data in {CHROMA_DB_DIR} for fresh processing.")
             except OSError as e:
                 st.error(f"Error removing ChromaDB directory: {e}. Please manually delete '{CHROMA_DB_DIR}' if this persists.")
-        # This line MUST be indented with 4 spaces (relative to the outermost 'if')
-        st.session_state.clear() 
-        # This line MUST be indented with 4 spaces (relative to the outermost 'if')
-        st.rerun()  # Stop execution if unable to clear old data
+                st.stop() # Stop execution if unable to clear old data
 
-    # --- CRUCIAL FIX: Explicitly clear the cache for this specific function ---
-    # This forces Streamlit to re-run create_vector_store_and_retriever() completely
-    # and create new vectorstore and retriever objects.
-    create_vector_store_and_retriever.clear() 
+        # --- CRUCIAL FIX: Explicitly clear the cache for this specific function ---
+        create_vector_store_and_retriever.clear() 
 
-    st.session_state['processed'] = False 
-    st.session_state['retriever'] = None
-    st.session_state['llm'] = None
-    # No need to update uploaded_files_hash or uploaded_raw_docs state if they are already set from file_uploader
-    # and load_documents_from_upload, as the cache clear will make create_vector_store_and_retriever re-execute.
-    st.session_state['uploaded_raw_docs'] = load_documents_from_upload(uploaded_files) # Reload/assign raw docs
-
-    if st.session_state['uploaded_raw_docs']:
-        try:
-            # Call cached function without arguments, it picks from session_state
-            llm_instance, retriever_instance = create_vector_store_and_retriever() 
-            st.session_state['llm'] = llm_instance
-            st.session_state['retriever'] = retriever_instance
-            st.session_state['processed'] = True
-            st.success(f"Successfully processed {len(st.session_state['uploaded_raw_docs'])} documents and built knowledge base!")
-        except Exception as e:
-            st.error(f"Error during document processing: {e}")
-            st.warning("Please ensure your Google API Key is correctly set in your .env file.")
-    else:
-        st.warning("No documents were loaded from the uploaded files.")
+        st.session_state['processed'] = False 
+        st.session_state['retriever'] = None
+        st.session_state['llm'] = None
+        st.session_state['uploaded_files_hash'] = files_hash 
+        st.session_state['uploaded_raw_docs'] = load_documents_from_upload(uploaded_files) 
+        
+        if st.session_state['uploaded_raw_docs']:
+            try:
+                llm_instance, retriever_instance = create_vector_store_and_retriever() 
+                st.session_state['llm'] = llm_instance
+                st.session_state['retriever'] = retriever_instance
+                st.session_state['processed'] = True
+                st.success(f"Successfully processed {len(st.session_state['uploaded_raw_docs'])} documents and built knowledge base!")
+            except Exception as e:
+                st.error(f"Error during document processing: {e}")
+                st.warning("Please ensure your Google API Key is correctly set in your .env file.")
+        else:
+            st.warning("No documents were loaded from the uploaded files.")
 elif 'processed' in st.session_state and st.session_state['processed']:
     current_files_hash = hash(tuple((f.name, f.size) for f in uploaded_files)) if uploaded_files else None
     if 'uploaded_files_hash' in st.session_state and st.session_state['uploaded_files_hash'] != current_files_hash:
@@ -399,25 +394,23 @@ if 'processed' in st.session_state and st.session_state['processed'] and st.sess
                 
                 if decision:
                     st.subheader("Decision Summary:")
-                    # --- DYNAMIC DISPLAY LOGIC ---
                     if decision.Decision in ["Information Provided", "Clarification Needed"]:
                         st.info(f"**Output:** {decision.Decision}")
-                        st.write(f"**Details:** {decision.Justification}") # Using st.write for Justification
-                    else: # Approved, Rejected, Needs Further Review (for claims)
+                        st.write(f"**Details:** {decision.Justification}") 
+                    else: 
                         st.success(f"**Decision:** {decision.Decision}")
                         if decision.Amount is not None:
-                            st.write(f"**Amount:** {decision.Amount:,.2f}") # Format amount nicely
-                        st.write(f"**Justification:** {decision.Justification}") # Using st.write for Justification
+                            st.write(f"**Amount:** {decision.Amount:,.2f}") 
+                        st.write(f"**Justification:** {decision.Justification}") 
                     
-                    # --- Option to view complete JSON format ---
                     with st.expander("View Complete JSON Response"):
                         st.json(decision.model_dump_json(indent=2))
                     
                     st.subheader("Supporting Clauses:")
-                    if decision.SupportingClauses: # Ensure it's not None and has items
+                    if decision.SupportingClauses: 
                         for i, clause in enumerate(decision.SupportingClauses):
                             st.markdown(f"**Clause {i+1}** (Source: `{clause.document_id}`, Page: `{clause.page_number if clause.page_number else 'N/A'}`):")
-                            st.text(clause.clause_text) # --- REVERTED: Using st.text for simple display ---
+                            st.text(clause.clause_text) # Reverted to st.text for simple display
                             st.markdown("---")
                     else:
                         st.info("No specific supporting clauses cited by the LLM for this response, or the information was synthesized.")
@@ -429,16 +422,14 @@ else:
     st.info("Please upload and process documents first to enable the query section.")
 
 # --- Clean up cached resources on app rerun or close ---
+# This button's block was the source of repeated IndentationErrors.
+# Corrected indentation is crucial.
 if st.button("Clear Processed Data & Restart", key="clear_data_button"):
-    # This line (and all lines below it that are part of this block) needs 4 spaces indentation
     if os.path.exists(CHROMA_DB_DIR):
-        # This line (and all its sub-lines) needs 8 spaces indentation
-        import shutil
         try:
             shutil.rmtree(CHROMA_DB_DIR)
             st.success("Cleaned up processed data and restarted session.")
         except OSError as e:
             st.error(f"Error removing ChromaDB directory: {e}. Please manually delete '{CHROMA_DB_DIR}' if this persists.")
-    # This line (and its sub-lines) needs 4 spaces indentation
     st.session_state.clear()
     st.rerun() # Rerun the app from top to reset UI
