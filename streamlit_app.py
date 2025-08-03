@@ -5,19 +5,22 @@ import os
 import json
 import tempfile 
 from dotenv import load_dotenv
-import shutil 
+import shutil # Still imported for Clear Data & Restart button
 import chromadb 
 
-# --- CRITICAL FIX FOR SQLITE3 COMPATIBILITY (MODIFIED) ---
+# --- CRITICAL FIX FOR SQLITE3 COMPATIBILITY (MUST BE AT THE ABSOLUTE TOP) ---
 # This block ensures pysqlite3 is loaded and replaces standard sqlite3
 # BEFORE any other library (like chromadb) tries to import sqlite3.
-__import__('pysqlite3')
-import sys # <--- THIS IS THE MISSING IMPORT!
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+# The 'import pysqlite3' directly is more robust than __import__
+try:
+    import pysqlite3 
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+except ImportError:
+    st.warning("pysqlite3-binary not found. Falling back to default sqlite3. Expect issues if system sqlite3 is old.")
 # --- END CRITICAL FIX ---
 
 
-# LangChain and Pydantic Imports
+# LangChain and Pydantic Imports (these should now come AFTER the above fix)
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma 
 from langchain.prompts import PromptTemplate
@@ -34,8 +37,7 @@ from langchain.retrievers import EnsembleRetriever
 
 from query_parser import parse_user_query 
 
-# ... (rest of your code) ...
-
+# --- Load Environment Variables ---
 load_dotenv() 
 
 # --- Initialize Streamlit session state variables at the top ---
@@ -51,12 +53,12 @@ if 'uploaded_raw_docs' not in st.session_state:
     st.session_state['uploaded_raw_docs'] = None
 
 # --- Configuration Constants ---
-# CHROMA_DB_DIR is no longer used for persistence, but we keep it for shutil.rmtree below
+# CHROMA_DB_DIR is no longer used for persistence by ChromaDB itself in this mode
 CHROMA_DB_DIR = "chroma_db_streamlit_unused" 
 GEMINI_LLM_MODEL = "models/gemini-2.5-pro"
 EMBEDDING_MODEL_NAME = "models/text-embedding-004"
 
-# --- Pydantic Models ---
+# --- Pydantic Models (single, consistent schema for LLM output) ---
 class SupportingClause(BaseModel):
     clause_text: str = Field(..., description="The exact text of the clause from the document.")
     document_id: str = Field(..., description="Identifier for the source document (e.g., policy_123.pdf).")
@@ -113,6 +115,8 @@ def load_documents_from_upload(uploaded_files):
     hash_funcs={Document: lambda doc: (doc.page_content, tuple(sorted(doc.metadata.items())))}
 )
 def create_vector_store_and_retriever(): 
+    # Get all documents that have been uploaded so far in this session
+    # This list will accumulate across "Process Documents" clicks if not explicitly cleared
     raw_documents_list = st.session_state.uploaded_raw_docs 
 
     st.info(f"Processing {len(raw_documents_list)} documents for ingestion and creating knowledge base. This may take a while...")
@@ -128,42 +132,32 @@ def create_vector_store_and_retriever():
     embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL_NAME)
     llm = ChatGoogleGenerativeAI(model=GEMINI_LLM_MODEL, temperature=0.2)
 
-    collection_name = "policy_docs_in_memory_session" 
-
+    # --- Initialize a PURE IN-MEMORY ChromaDB client ---
     try:
         client = chromadb.Client() 
+        collection_name = "policy_docs_in_memory_session" 
         
+        # Always delete the collection for a fresh in-memory state for this processing run.
+        # This prevents issues if the collection from a *previous click* is still hanging around in memory.
         try:
             client.delete_collection(name=collection_name)
             st.info(f"Deleted previous in-memory ChromaDB collection '{collection_name}'.")
         except: 
             pass 
 
-        # Create collection with the correct embedding_function
-        # For explicit client, embedding_function is set here.
         collection = client.create_collection(name=collection_name, embedding_function=embeddings)
         
-        # --- NEW: Batching for adding documents to ChromaDB ---
-        batch_size = 100 # Process 100 chunks at a time for embedding
-        for i in range(0, len(chunks), batch_size):
-            batch_chunks = chunks[i:i + batch_size]
-            
-            # Prepare data for this batch
-            batch_ids = [f"doc_{j}" for j in range(i, i + len(batch_chunks))]
-            batch_documents_content = [chunk.page_content for chunk in batch_chunks]
-            batch_metadatas = [chunk.metadata for chunk in batch_chunks]
-            
-            # Add the batch to the collection
-            collection.add(
-                ids=batch_ids,
-                documents=batch_documents_content,
-                metadatas=batch_metadatas
-            )
-            st.write(f"Added batch {i//batch_size + 1} of {len(batch_chunks)} chunks.")
+        ids = [f"doc_{i}" for i in range(len(chunks))]
+        documents_content = [chunk.page_content for chunk in chunks]
+        metadatas = [chunk.metadata for chunk in chunks]
         
-        st.write(f"ChromaDB in-memory collection '{collection_name}' populated with {len(chunks)} chunks.")
+        collection.add(
+            ids=ids,
+            documents=documents_content,
+            metadatas=metadatas
+        )
+        st.write(f"ChromaDB in-memory collection '{collection_name}' populated.")
         
-        # Use the LangChain wrapper around the explicit in-memory client and collection
         vectorstore = Chroma(client=client, collection_name=collection_name, embedding_function=embeddings)
         st.success("ChromaDB initialized in-memory (no disk issues!). Data will not persist across app restarts.")
 
@@ -172,7 +166,6 @@ def create_vector_store_and_retriever():
         st.stop()
 
 
-    # Rest of retriever setup is fine and uses the 'vectorstore' object defined above
     semantic_retriever = vectorstore.as_retriever(search_kwargs={"k": 7}) 
     
     all_stored_data = vectorstore.get(include=['documents', 'metadatas'])
@@ -192,8 +185,7 @@ def create_vector_store_and_retriever():
     st.write("Hybrid Retriever initialized.")
     return llm, retriever
 
-
-# --- Core Policy Decision Logic (No functional change) ---
+# --- Core Policy Decision Logic (from app.py) ---
 def get_policy_decision(user_query: str, llm_instance, retriever_instance) -> PolicyDecision | None:
     print(f"\nProcessing query: '{user_query}'") 
 
@@ -375,9 +367,9 @@ if uploaded_files:
     files_hash = hash(tuple((f.name, f.size) for f in uploaded_files))
     
     if st.button("Process Documents", key="process_docs_button"):
-        # --- Delete previous ChromaDB data for a fresh start ---
-        # This shutil.rmtree will try to remove the directory used by persistent ChromaDB,
-        # but for in-memory, it's less critical.
+        # --- Delete previous ChromaDB data (no longer critical for in-memory) ---
+        # This will still clear the directory if it was created by a previous attempt,
+        # but the ChromaDB itself is now in-memory.
         if os.path.exists(CHROMA_DB_DIR):
             try:
                 shutil.rmtree(CHROMA_DB_DIR)
@@ -387,7 +379,6 @@ if uploaded_files:
                 st.stop() # Stop execution if unable to clear old data
 
         # --- CRUCIAL FIX: Explicitly clear the cache for this specific function ---
-        # This ensures create_vector_store_and_retriever always runs fresh.
         st.cache_resource.clear() 
 
         st.session_state['processed'] = False 
