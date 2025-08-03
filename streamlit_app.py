@@ -5,6 +5,7 @@ import json
 import tempfile 
 from dotenv import load_dotenv
 import shutil # For removing directories
+import chromadb # --- NEW: Import chromadb directly for client management ---
 
 # --- CRITICAL FIX FOR SQLITE3 COMPATIBILITY (MUST BE AT THE VERY TOP) ---
 # This block ensures ChromaDB uses pysqlite3-binary instead of system sqlite3
@@ -15,7 +16,7 @@ sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
 # LangChain and Pydantic Imports
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_chroma import Chroma 
+from langchain_chroma import Chroma # Correct import for Chroma
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from pydantic import BaseModel, Field, ValidationError
@@ -47,7 +48,7 @@ if 'uploaded_raw_docs' not in st.session_state:
     st.session_state['uploaded_raw_docs'] = None
 
 # --- Configuration Constants ---
-CHROMA_DB_DIR = "chroma_db_streamlit" 
+CHROMA_DB_DIR = "chroma_db_streamlit" # Using a separate directory for UI's Chroma DB
 GEMINI_LLM_MODEL = "models/gemini-2.5-pro"
 EMBEDDING_MODEL_NAME = "models/text-embedding-004"
 
@@ -112,7 +113,6 @@ def create_vector_store_and_retriever():
 
     st.info(f"Processing {len(raw_documents_list)} documents for ingestion and creating knowledge base. This may take a while...")
 
-    # 1. Split documents into chunks
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1500, 
         chunk_overlap=150,
@@ -121,16 +121,71 @@ def create_vector_store_and_retriever():
     chunks = text_splitter.split_documents(raw_documents_list)
     st.write(f"Split documents into {len(chunks)} chunks.")
 
-    # 2. Initialize Embeddings and LLM
     embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL_NAME)
     llm = ChatGoogleGenerativeAI(model=GEMINI_LLM_MODEL, temperature=0.2)
 
-    # 3. Create/Load ChromaDB
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        persist_directory=CHROMA_DB_DIR
-    )
+    # --- NEW: Robust ChromaDB Client Management ---
+    collection_name = "policy_docs_collection" # Define a consistent collection name
+
+    try:
+        # Try to initialize a persistent client and manage its collection
+        # This will create the directory if it doesn't exist
+        client = chromadb.PersistentClient(path=CHROMA_DB_DIR)
+        
+        # Explicitly delete the collection if it already exists to ensure a fresh start
+        # This is more robust than just rmtree, as it manages Chroma's internal state.
+        try:
+            client.delete_collection(name=collection_name)
+            st.info(f"Deleted existing ChromaDB collection '{collection_name}' for fresh data.")
+        except: # Ignore error if collection doesn't exist (first run)
+            pass 
+        
+        # Create a new collection
+        collection = client.create_collection(name=collection_name, embedding_function=embeddings)
+        
+        # Add documents to the collection
+        ids = [f"doc_{i}" for i in range(len(chunks))]
+        documents_content = [chunk.page_content for chunk in chunks]
+        metadatas = [chunk.metadata for chunk in chunks]
+        
+        collection.add(
+            ids=ids,
+            documents=documents_content,
+            metadatas=metadatas
+        )
+        st.write(f"ChromaDB collection '{collection_name}' populated.")
+        
+        # Use the LangChain wrapper around the explicit client and collection
+        vectorstore = Chroma(client=client, collection_name=collection_name, embedding_function=embeddings)
+
+    except Exception as e:
+        st.error(f"Error with persistent ChromaDB: {e}. Falling back to in-memory database. Data will not persist across restarts.")
+        # Fallback to an in-memory client if persistent setup fails (e.g., readonly error)
+        # This client is typically volatile but avoids disk write issues.
+        client = chromadb.Client() 
+        collection_name = "policy_docs_in_memory_fallback" # Use a different name for in-memory
+        
+        # Ensure collection is fresh for in-memory client too
+        try:
+            client.delete_collection(name=collection_name)
+        except:
+            pass
+
+        collection = client.create_collection(name=collection_name, embedding_function=embeddings)
+        
+        ids = [f"doc_{i}" for i in range(len(chunks))]
+        documents_content = [chunk.page_content for chunk in chunks]
+        metadatas = [chunk.metadata for chunk in chunks]
+        
+        collection.add(
+            ids=ids,
+            documents=documents_content,
+            metadatas=metadatas
+        )
+        st.write(f"ChromaDB in-memory collection '{collection_name}' populated.")
+        vectorstore = Chroma(client=client, collection_name=collection_name, embedding_function=embeddings)
+        st.warning("Using in-memory ChromaDB (data will not persist across restarts).")
+
     st.write("ChromaDB created/loaded.")
 
     # 4. Configure Hybrid Retriever
@@ -153,21 +208,16 @@ def create_vector_store_and_retriever():
     st.write("Hybrid Retriever initialized.")
     return llm, retriever
 
-# --- Core Policy Decision Logic ---
+# --- Core Policy Decision Logic (No functional change, minor comment change) ---
 def get_policy_decision(user_query: str, llm_instance, retriever_instance) -> PolicyDecision | None:
-    """
-    Processes a user query, retrieves relevant policy clauses, and generates a structured decision.
-    Returns a PolicyDecision object or None on error.
-    """
-    print(f"\nProcessing query: '{user_query}'") # Will print to console/logs, not Streamlit app
+    print(f"\nProcessing query: '{user_query}'") 
 
-    # 1. Parse and Structure the Query
     parsed_details = parse_user_query(user_query) 
     if not parsed_details:
         st.error("Could not parse query details. Please refine your query.")
         return None
     
-    current_date_for_policy_inference = date(2025, 8, 2) # August 2, 2025
+    current_date_for_policy_inference = date(2025, 8, 2) 
     if parsed_details.policy_duration_months is not None and parsed_details.policy_start_date is None:
         start_date = current_date_for_policy_inference - timedelta(days=parsed_details.policy_duration_months * 30)
         parsed_details.policy_start_date = start_date.strftime("%Y-%m-%d")
@@ -351,14 +401,14 @@ if uploaded_files:
                 st.stop() # Stop execution if unable to clear old data
 
         # --- CRUCIAL FIX: Explicitly clear the cache for this specific function ---
-        create_vector_store_and_retriever.clear() 
+        st.cache_resource.clear() 
 
         st.session_state['processed'] = False 
         st.session_state['retriever'] = None
         st.session_state['llm'] = None
         st.session_state['uploaded_files_hash'] = files_hash 
         st.session_state['uploaded_raw_docs'] = load_documents_from_upload(uploaded_files) 
-        
+
         if st.session_state['uploaded_raw_docs']:
             try:
                 llm_instance, retriever_instance = create_vector_store_and_retriever() 
@@ -422,8 +472,6 @@ else:
     st.info("Please upload and process documents first to enable the query section.")
 
 # --- Clean up cached resources on app rerun or close ---
-# This button's block was the source of repeated IndentationErrors.
-# Corrected indentation is crucial.
 if st.button("Clear Processed Data & Restart", key="clear_data_button"):
     if os.path.exists(CHROMA_DB_DIR):
         try:
