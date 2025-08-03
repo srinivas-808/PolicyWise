@@ -1,22 +1,26 @@
 # streamlit_app.py
+
+# --- CRITICAL FIX FOR SQLITE3 COMPATIBILITY (MOVED TO THE ABSOLUTE TOP) ---
+# This block ensures pysqlite3 is loaded and replaces standard sqlite3
+# BEFORE any other library (like chromadb) tries to import sqlite3.
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+# --- END CRITICAL FIX ---
+
+
 import streamlit as st
 import os
 import json
 import tempfile 
 from dotenv import load_dotenv
 import shutil # For removing directories
-import chromadb # --- NEW: Import chromadb directly for client management ---
-
-# --- CRITICAL FIX FOR SQLITE3 COMPATIBILITY (MUST BE AT THE VERY TOP) ---
-# This block ensures ChromaDB uses pysqlite3-binary instead of system sqlite3
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-# --- END CRITICAL FIX ---
+# --- MOVED: chromadb import moved here, after the sqlite3 fix ---
+import chromadb 
 
 # LangChain and Pydantic Imports
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_chroma import Chroma # Correct import for Chroma
+from langchain_chroma import Chroma 
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from pydantic import BaseModel, Field, ValidationError
@@ -48,7 +52,7 @@ if 'uploaded_raw_docs' not in st.session_state:
     st.session_state['uploaded_raw_docs'] = None
 
 # --- Configuration Constants ---
-CHROMA_DB_DIR = "chroma_db_streamlit" # Using a separate directory for UI's Chroma DB
+CHROMA_DB_DIR = "chroma_db_streamlit" 
 GEMINI_LLM_MODEL = "models/gemini-2.5-pro"
 EMBEDDING_MODEL_NAME = "models/text-embedding-004"
 
@@ -124,26 +128,20 @@ def create_vector_store_and_retriever():
     embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL_NAME)
     llm = ChatGoogleGenerativeAI(model=GEMINI_LLM_MODEL, temperature=0.2)
 
-    # --- NEW: Robust ChromaDB Client Management ---
-    collection_name = "policy_docs_collection" # Define a consistent collection name
+    # --- Robust ChromaDB Client Management ---
+    collection_name = "policy_docs_collection" 
 
     try:
-        # Try to initialize a persistent client and manage its collection
-        # This will create the directory if it doesn't exist
         client = chromadb.PersistentClient(path=CHROMA_DB_DIR)
         
-        # Explicitly delete the collection if it already exists to ensure a fresh start
-        # This is more robust than just rmtree, as it manages Chroma's internal state.
         try:
             client.delete_collection(name=collection_name)
             st.info(f"Deleted existing ChromaDB collection '{collection_name}' for fresh data.")
-        except: # Ignore error if collection doesn't exist (first run)
+        except: 
             pass 
         
-        # Create a new collection
         collection = client.create_collection(name=collection_name, embedding_function=embeddings)
         
-        # Add documents to the collection
         ids = [f"doc_{i}" for i in range(len(chunks))]
         documents_content = [chunk.page_content for chunk in chunks]
         metadatas = [chunk.metadata for chunk in chunks]
@@ -155,17 +153,13 @@ def create_vector_store_and_retriever():
         )
         st.write(f"ChromaDB collection '{collection_name}' populated.")
         
-        # Use the LangChain wrapper around the explicit client and collection
         vectorstore = Chroma(client=client, collection_name=collection_name, embedding_function=embeddings)
 
     except Exception as e:
         st.error(f"Error with persistent ChromaDB: {e}. Falling back to in-memory database. Data will not persist across restarts.")
-        # Fallback to an in-memory client if persistent setup fails (e.g., readonly error)
-        # This client is typically volatile but avoids disk write issues.
         client = chromadb.Client() 
-        collection_name = "policy_docs_in_memory_fallback" # Use a different name for in-memory
+        collection_name = "policy_docs_in_memory_fallback" 
         
-        # Ensure collection is fresh for in-memory client too
         try:
             client.delete_collection(name=collection_name)
         except:
@@ -188,7 +182,6 @@ def create_vector_store_and_retriever():
 
     st.write("ChromaDB created/loaded.")
 
-    # 4. Configure Hybrid Retriever
     semantic_retriever = vectorstore.as_retriever(search_kwargs={"k": 7}) 
     
     all_stored_data = vectorstore.get(include=['documents', 'metadatas'])
@@ -208,7 +201,7 @@ def create_vector_store_and_retriever():
     st.write("Hybrid Retriever initialized.")
     return llm, retriever
 
-# --- Core Policy Decision Logic (No functional change, minor comment change) ---
+# --- Core Policy Decision Logic ---
 def get_policy_decision(user_query: str, llm_instance, retriever_instance) -> PolicyDecision | None:
     print(f"\nProcessing query: '{user_query}'") 
 
@@ -246,7 +239,6 @@ def get_policy_decision(user_query: str, llm_instance, retriever_instance) -> Po
         doc_id = doc.metadata.get('document_id', 'Unknown Document')
         page_num = doc.metadata.get('page_number', 'N/A')
         
-        # Simpler cleaning for clause_text (flattens to one line for st.text)
         cleaned_clause_text = doc.page_content.replace('\n', ' ').strip() 
         cleaned_clause_text = ' '.join(cleaned_clause_text.split()) 
         
