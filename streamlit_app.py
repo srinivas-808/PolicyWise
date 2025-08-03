@@ -1,24 +1,20 @@
 # streamlit_app.py
 
-# --- CRITICAL FIX FOR SQLITE3 COMPATIBILITY (MOVED TO THE ABSOLUTE TOP) ---
-# This block ensures pysqlite3 is loaded and replaces standard sqlite3
-# BEFORE any other library (like chromadb) tries to import sqlite3.
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-# --- END CRITICAL FIX ---
-
-
 import streamlit as st
 import os
 import json
 import tempfile 
 from dotenv import load_dotenv
-import shutil # For removing directories
-# --- MOVED: chromadb import moved here, after the sqlite3 fix ---
+import shutil 
 import chromadb 
 
-# LangChain and Pydantic Imports
+# --- CRITICAL FIX FOR SQLITE3 COMPATIBILITY (MODIFIED) ---
+import pysqlite3 # --- NEW: Explicitly import pysqlite3 ---
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+# --- END CRITICAL FIX ---
+
+# LangChain and Pydantic Imports (these should now come AFTER the above fix)
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma 
 from langchain.prompts import PromptTemplate
@@ -33,11 +29,11 @@ from langchain_core.documents import Document
 from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever
 
-# --- Import the parse_user_query function ---
 from query_parser import parse_user_query 
 
-# --- Load Environment Variables ---
 load_dotenv() 
+
+# ... (rest of your streamlit_app.py code) ...
 
 # --- Initialize Streamlit session state variables at the top ---
 if 'processed' not in st.session_state:
