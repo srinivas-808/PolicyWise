@@ -6,21 +6,18 @@ import json
 import tempfile 
 from dotenv import load_dotenv
 import shutil 
-import chromadb # --- NEW: Import chromadb directly for client management ---
+import chromadb 
 
-# --- CRITICAL FIX FOR SQLITE3 COMPATIBILITY (MODIFIED AND MOVED TO ABSOLUTE TOP) ---
+# --- CRITICAL FIX FOR SQLITE3 COMPATIBILITY (MODIFIED) ---
 # This block ensures pysqlite3 is loaded and replaces standard sqlite3
 # BEFORE any other library (like chromadb) tries to import sqlite3.
-# The 'import pysqlite3' directly is more robust than __import__
-try:
-    import pysqlite3 
-    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-except ImportError:
-    st.warning("pysqlite3-binary not found. Falling back to default sqlite3. Expect issues if system sqlite3 is old.")
+__import__('pysqlite3')
+import sys # <--- THIS IS THE MISSING IMPORT!
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 # --- END CRITICAL FIX ---
 
 
-# LangChain and Pydantic Imports (these should now come AFTER the above fix)
+# LangChain and Pydantic Imports
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma 
 from langchain.prompts import PromptTemplate
@@ -36,6 +33,8 @@ from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever
 
 from query_parser import parse_user_query 
+
+# ... (rest of your code) ...
 
 load_dotenv() 
 
