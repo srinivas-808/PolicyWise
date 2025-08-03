@@ -1,5 +1,14 @@
 # streamlit_app.py
 
+# --- CRITICAL FIX FOR SQLITE3 COMPATIBILITY (MOVED TO THE ABSOLUTE TOP) ---
+# This block ensures pysqlite3 is loaded and replaces standard sqlite3
+# BEFORE any other library (like chromadb) tries to import sqlite3.
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+# --- END CRITICAL FIX ---
+
+
 import streamlit as st
 import os
 import json
@@ -8,13 +17,7 @@ from dotenv import load_dotenv
 import shutil 
 import chromadb 
 
-# --- CRITICAL FIX FOR SQLITE3 COMPATIBILITY (MODIFIED) ---
-import pysqlite3 # --- NEW: Explicitly import pysqlite3 ---
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-# --- END CRITICAL FIX ---
-
-# LangChain and Pydantic Imports (these should now come AFTER the above fix)
+# LangChain and Pydantic Imports
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma 
 from langchain.prompts import PromptTemplate
@@ -33,8 +36,6 @@ from query_parser import parse_user_query
 
 load_dotenv() 
 
-# ... (rest of your streamlit_app.py code) ...
-
 # --- Initialize Streamlit session state variables at the top ---
 if 'processed' not in st.session_state:
     st.session_state['processed'] = False
@@ -48,7 +49,9 @@ if 'uploaded_raw_docs' not in st.session_state:
     st.session_state['uploaded_raw_docs'] = None
 
 # --- Configuration Constants ---
-CHROMA_DB_DIR = "chroma_db_streamlit" 
+# CHROMA_DB_DIR is no longer needed for in-memory ChromaDB, but keep it for clarity
+CHROMA_DB_DIR = "chroma_db_streamlit" # This directory will still be created/deleted by shutil.rmtree
+                                      # but ChromaDB itself won't use it for persistence in this mode.
 GEMINI_LLM_MODEL = "models/gemini-2.5-pro"
 EMBEDDING_MODEL_NAME = "models/text-embedding-004"
 
@@ -104,7 +107,7 @@ def load_documents_from_upload(uploaded_files):
             documents.extend(docs)
     return documents
 
-# --- Cached Function to Create Vector Store and Retriever ---
+# --- Cached Function to Create Vector Store and Retriever (MODIFIED FOR IN-MEMORY CHROMADB) ---
 @st.cache_resource(
     hash_funcs={Document: lambda doc: (doc.page_content, tuple(sorted(doc.metadata.items())))}
 )
@@ -124,62 +127,39 @@ def create_vector_store_and_retriever():
     embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL_NAME)
     llm = ChatGoogleGenerativeAI(model=GEMINI_LLM_MODEL, temperature=0.2)
 
-    # --- Robust ChromaDB Client Management ---
-    collection_name = "policy_docs_collection" 
-
+    # --- NEW: Initialize an IN-MEMORY ChromaDB client ---
+    # This completely bypasses file-based sqlite3 issues.
+    client = chromadb.Client() 
+    collection_name = "policy_docs_in_memory_collection" # Use a distinct name for the in-memory collection
+    
+    # Ensure collection is fresh for in-memory client
     try:
-        client = chromadb.PersistentClient(path=CHROMA_DB_DIR)
-        
-        try:
-            client.delete_collection(name=collection_name)
-            st.info(f"Deleted existing ChromaDB collection '{collection_name}' for fresh data.")
-        except: 
-            pass 
-        
-        collection = client.create_collection(name=collection_name, embedding_function=embeddings)
-        
-        ids = [f"doc_{i}" for i in range(len(chunks))]
-        documents_content = [chunk.page_content for chunk in chunks]
-        metadatas = [chunk.metadata for chunk in chunks]
-        
-        collection.add(
-            ids=ids,
-            documents=documents_content,
-            metadatas=metadatas
-        )
-        st.write(f"ChromaDB collection '{collection_name}' populated.")
-        
-        vectorstore = Chroma(client=client, collection_name=collection_name, embedding_function=embeddings)
+        client.delete_collection(name=collection_name)
+    except:
+        pass # Ignore if collection doesn't exist yet
 
-    except Exception as e:
-        st.error(f"Error with persistent ChromaDB: {e}. Falling back to in-memory database. Data will not persist across restarts.")
-        client = chromadb.Client() 
-        collection_name = "policy_docs_in_memory_fallback" 
-        
-        try:
-            client.delete_collection(name=collection_name)
-        except:
-            pass
-
-        collection = client.create_collection(name=collection_name, embedding_function=embeddings)
-        
-        ids = [f"doc_{i}" for i in range(len(chunks))]
-        documents_content = [chunk.page_content for chunk in chunks]
-        metadatas = [chunk.metadata for chunk in chunks]
-        
-        collection.add(
-            ids=ids,
-            documents=documents_content,
-            metadatas=metadatas
-        )
-        st.write(f"ChromaDB in-memory collection '{collection_name}' populated.")
-        vectorstore = Chroma(client=client, collection_name=collection_name, embedding_function=embeddings)
-        st.warning("Using in-memory ChromaDB (data will not persist across restarts).")
+    collection = client.create_collection(name=collection_name, embedding_function=embeddings)
+    
+    ids = [f"doc_{i}" for i in range(len(chunks))]
+    documents_content = [chunk.page_content for chunk in chunks]
+    metadatas = [chunk.metadata for chunk in chunks]
+    
+    collection.add(
+        ids=ids,
+        documents=documents_content,
+        metadatas=metadatas
+    )
+    st.write(f"ChromaDB in-memory collection '{collection_name}' populated.")
+    # Use the LangChain wrapper around the explicit in-memory client and collection
+    vectorstore = Chroma(client=client, collection_name=collection_name, embedding_function=embeddings)
+    st.warning("Using in-memory ChromaDB (data will NOT persist across restarts, but avoids file errors).")
 
     st.write("ChromaDB created/loaded.")
 
     semantic_retriever = vectorstore.as_retriever(search_kwargs={"k": 7}) 
     
+    # Note: For BM25, you need the content of all documents.
+    # vectorstore.get() is still functional for in-memory ChromaDB.
     all_stored_data = vectorstore.get(include=['documents', 'metadatas'])
     bm25_documents = [
         Document(page_content=content, metadata=metadata)
@@ -197,7 +177,7 @@ def create_vector_store_and_retriever():
     st.write("Hybrid Retriever initialized.")
     return llm, retriever
 
-# --- Core Policy Decision Logic ---
+# --- Core Policy Decision Logic (No functional change) ---
 def get_policy_decision(user_query: str, llm_instance, retriever_instance) -> PolicyDecision | None:
     print(f"\nProcessing query: '{user_query}'") 
 
