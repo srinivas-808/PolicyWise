@@ -4,8 +4,7 @@ import os
 import json
 import tempfile 
 from dotenv import load_dotenv
-import shutil # --- NEW: Import shutil for directory operations ---
-
+# import re # --- REMOVED: No longer needed for complex text cleaning ---
 __import__('pysqlite3')
 import sys
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
@@ -114,9 +113,6 @@ def create_vector_store_and_retriever():
     llm = ChatGoogleGenerativeAI(model=GEMINI_LLM_MODEL, temperature=0.2)
 
     # 3. Create/Load ChromaDB
-    # If CHROMA_DB_DIR exists (from a previous session or if not deleted by UI button), 
-    # Chroma might try to load it and append.
-    # The `shutil.rmtree(CHROMA_DB_DIR)` in the button logic handles clearing.
     vectorstore = Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
@@ -337,15 +333,6 @@ if uploaded_files:
     files_hash = hash(tuple((f.name, f.size) for f in uploaded_files))
     
     if st.button("Process Documents", key="process_docs_button"):
-        # --- NEW: Delete previous ChromaDB data for a fresh start ---
-        if os.path.exists(CHROMA_DB_DIR):
-            try:
-                shutil.rmtree(CHROMA_DB_DIR)
-                st.info(f"Cleared previous data in {CHROMA_DB_DIR} for fresh processing.")
-            except OSError as e:
-                st.error(f"Error removing previous ChromaDB data: {e}")
-                st.stop() # Stop execution if unable to clear old data
-
         st.session_state['processed'] = False 
         st.session_state['retriever'] = None
         st.session_state['llm'] = None
